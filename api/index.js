@@ -77,7 +77,7 @@ app.get('/api/tramites', async (req, res) => {
   }
 });
 
-// --- Crear reporte (con prioridad automática para casos sensibles) ---
+// --- Crear reporte (con prioridad automática y protección anti-duplicados) ---
 app.post('/api/reportes', async (req, res) => {
   try {
     const database = await connectDB();
@@ -88,6 +88,19 @@ app.post('/api/reportes', async (req, res) => {
         ok: false,
         error: 'Faltan campos obligatorios: tipo_reporte, categoria, descripcion',
       });
+    }
+
+    // Anti-duplicados: si el mismo psid mandó la misma descripción en los
+    // últimos 2 minutos, regresa el folio ya existente en vez de crear otro.
+    const dosMinutosAtras = new Date(Date.now() - 2 * 60 * 1000);
+    const reporteExistente = await database.collection('reportes_ciudadanos').findOne({
+      'usuario.messenger_psid': psid || null,
+      descripcion,
+      fecha_creacion: { $gte: dosMinutosAtras },
+    });
+
+    if (reporteExistente) {
+      return res.json({ ok: true, folio: reporteExistente.folio, prioridad: reporteExistente.prioridad });
     }
 
     const categoriasSensibles = ['violencia', 'violencia_genero', 'seguridad', 'accidente'];
@@ -153,7 +166,7 @@ app.get('/api/dependencias', async (req, res) => {
   }
 });
 
-// --- Guardar contacto (WhatsApp o correo) ---
+// --- Guardar contacto (WhatsApp o correo) — con protección anti-duplicados ---
 app.post('/api/contactos', async (req, res) => {
   try {
     const database = await connectDB();
@@ -161,6 +174,21 @@ app.post('/api/contactos', async (req, res) => {
     if (!valor_contacto) {
       return res.status(400).json({ ok: false, error: 'Falta el dato de contacto (correo o número de WhatsApp)' });
     }
+
+    // Anti-duplicados: si ya se guardó este mismo contacto en los últimos
+    // 5 minutos (mismo psid + mismo valor_contacto), no insertar de nuevo.
+    // Esto protege contra reintentos automáticos del agente o de la red.
+    const cincoMinutosAtras = new Date(Date.now() - 5 * 60 * 1000);
+    const yaExiste = await database.collection('contactos_ciudadanos').findOne({
+      psid: psid || null,
+      valor_contacto,
+      fecha_registro: { $gte: cincoMinutosAtras },
+    });
+
+    if (yaExiste) {
+      return res.json({ ok: true, mensaje: 'Contacto guardado correctamente' });
+    }
+
     const nuevoContacto = {
       psid: psid || null,
       nombre: nombre || null,
