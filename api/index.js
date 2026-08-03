@@ -2,13 +2,8 @@
 // Middleware que conecta Botpress con MongoDB Atlas.
 // Reemplaza a la Atlas Data API (descontinuada el 30/sept/2025).
 //
-// ADAPTADO PARA VERCEL:
-// - Este archivo vive en la carpeta api/, que Vercel detecta automáticamente
-//   como función serverless.
-// - Ya NO usamos app.listen() al final; en su lugar exportamos la app
-//   (module.exports = app) y Vercel se encarga de invocarla en cada request.
-// - La conexión a Mongo sigue cacheándose en las variables `client`/`db`
-//   para reutilizarse entre invocaciones "calientes".
+// Corre como función serverless en Vercel (carpeta api/ detectada
+// automáticamente). No usa app.listen(); exporta la app con module.exports.
 
 require('dotenv').config();
 const express = require('express');
@@ -193,6 +188,40 @@ app.get('/api/dependencias', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ ok: false, error: 'Error al consultar directorio' });
+  }
+});
+
+// --- Endpoint: guardar contacto de un ciudadano (WhatsApp o correo) ---
+// Se guarda para que el equipo de Atención Ciudadana le dé seguimiento
+// manual después — este endpoint NO envía correos ni WhatsApps automáticos.
+app.post('/api/contactos', async (req, res) => {
+  try {
+    const database = await connectDB();
+    const { psid, nombre, tipo_contacto, valor_contacto, motivo } = req.body;
+
+    if (!valor_contacto) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Falta el dato de contacto (correo o número de WhatsApp)',
+      });
+    }
+
+    const nuevoContacto = {
+      psid: psid || null,
+      nombre: nombre || null,
+      tipo_contacto: tipo_contacto || 'no_especificado', // 'whatsapp' | 'correo'
+      valor_contacto,
+      motivo: motivo || null,
+      fecha_registro: new Date(),
+      atendido: false,
+    };
+
+    await database.collection('contactos_ciudadanos').insertOne(nuevoContacto);
+
+    res.json({ ok: true, mensaje: 'Contacto guardado correctamente' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: 'Error al guardar el contacto' });
   }
 });
 
