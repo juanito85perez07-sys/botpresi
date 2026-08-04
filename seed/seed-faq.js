@@ -5,7 +5,7 @@
 // Fuentes verificadas por búsqueda web (agosto 2026): periodicocorreo.com.mx
 // y doloreshidalgo.gob.mx/oficial. Los campos marcados "VERIFICAR" son datos
 // que NO pude confirmar con certeza — complétalos con el Ayuntamiento antes
-// de publicar.
+// de publicar
 
 require('dotenv').config();
 const { MongoClient } = require('mongodb');
