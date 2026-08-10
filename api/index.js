@@ -1,247 +1,67 @@
-// api/index.js
-// Middleware que conecta Botpress con MongoDB Atlas.
-// Reemplaza a la Atlas Data API (descontinuada el 30/sept/2025).
-//
-// Corre como función serverless en Vercel. No usa app.listen(); exporta
-// la app con module.exports.
-
-require('dotenv').config();
-const express = require('express');
-const { MongoClient } = require('mongodb');
-
-const app = express();
-app.use(express.json());
-
-const MONGO_URI = process.env.MONGO_URI;
-const DB_NAME = process.env.DB_NAME || 'dolores_hidalgo_atencion_ciudadana';
-const API_KEY = process.env.MIDDLEWARE_API_KEY;
-
-let client;
-let db;
-
-async function connectDB() {
-  if (db) return db;
-  client = new MongoClient(MONGO_URI, { maxPoolSize: 10 });
-  await client.connect();
-  db = client.db(DB_NAME);
-  console.log('✅ Conectado a MongoDB Atlas -', DB_NAME);
-  return db;
-}
-
-function checkApiKey(req, res, next) {
-  const key = req.headers['x-api-key'];
-  if (!API_KEY) {
-    console.warn('⚠️  MIDDLEWARE_API_KEY no está configurada');
-  }
-  if (key !== API_KEY) {
-    return res.status(401).json({ ok: false, error: 'No autorizado' });
-  }
-  next();
-}
-
-app.get('/health', (req, res) => {
-  res.json({ ok: true, status: 'up', timestamp: new Date().toISOString() });
-});
-
-app.use(checkApiKey);
-
-// --- Programas sociales ---
-app.get('/api/programas', async (req, res) => {
+// --- Capturar solicitud de cliente (Mocards) — para pasar a un asesor ---
+// No consulta inventario/precios reales (Mocards aún no tiene esa
+// integración) — solo registra la consulta organizada para que un
+// asesor humano la revise y responda con datos reales.
+app.post('/api/solicitudes', async (req, res) => {
   try {
     const database = await connectDB();
-    const { q } = req.query;
-    const filtro = q
-      ? { vigente: true, $or: [{ nombre: { $regex: q, $options: 'i' } }, { tags_busqueda: { $regex: q, $options: 'i' } }] }
-      : { vigente: true };
-    const resultados = await database.collection('programas_sociales').find(filtro).limit(5).toArray();
-    res.json({ ok: true, resultados });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ ok: false, error: 'Error al consultar programas sociales' });
-  }
-});
+    const {
+      psid,
+      nombre,
+      tipo_consulta,   // 'precio' | 'existencia' | 'apartado' | 'envio' | 'llamada' | 'queja' | 'otro'
+      producto,
+      talla,
+      color,
+      ocasion,
+      sucursal_preferida,
+      codigo_postal,
+      telefono_contacto,
+      resumen,
+    } = req.body;
 
-// --- Trámites ---
-app.get('/api/tramites', async (req, res) => {
-  try {
-    const database = await connectDB();
-    const { q } = req.query;
-    const filtro = q
-      ? { $or: [{ nombre: { $regex: q, $options: 'i' } }, { tags_busqueda: { $regex: q, $options: 'i' } }] }
-      : {};
-    const resultados = await database.collection('tramites_requisitos').find(filtro).limit(5).toArray();
-    res.json({ ok: true, resultados });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ ok: false, error: 'Error al consultar trámites' });
-  }
-});
-
-// --- Crear reporte (con prioridad automática y protección anti-duplicados) ---
-app.post('/api/reportes', async (req, res) => {
-  try {
-    const database = await connectDB();
-    const { psid, tipo_reporte, categoria, descripcion, ubicacion_referencia } = req.body;
-
-    if (!tipo_reporte || !categoria || !descripcion) {
+    if (!tipo_consulta || !resumen) {
       return res.status(400).json({
         ok: false,
-        error: 'Faltan campos obligatorios: tipo_reporte, categoria, descripcion',
+        error: 'Faltan campos obligatorios: tipo_consulta, resumen',
       });
     }
 
-    // Anti-duplicados: si el mismo psid mandó la misma descripción en los
-    // últimos 2 minutos, regresa el folio ya existente en vez de crear otro.
+    // Anti-duplicados: mismo psid + mismo resumen en los últimos 2 minutos.
     const dosMinutosAtras = new Date(Date.now() - 2 * 60 * 1000);
-    const reporteExistente = await database.collection('reportes_ciudadanos').findOne({
-      'usuario.messenger_psid': psid || null,
-      descripcion,
+    const existente = await database.collection('solicitudes_mocards').findOne({
+      psid: psid || null,
+      resumen,
       fecha_creacion: { $gte: dosMinutosAtras },
     });
-
-    if (reporteExistente) {
-      return res.json({ ok: true, folio: reporteExistente.folio, prioridad: reporteExistente.prioridad });
+    if (existente) {
+      return res.json({ ok: true, folio: existente.folio });
     }
 
-    const categoriasSensibles = ['violencia', 'violencia_genero', 'seguridad', 'accidente'];
-    const esSensible = categoriasSensibles.includes(categoria);
+    const folio = `MC-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`;
 
-    const folio = `RC-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`;
-
-    const nuevoReporte = {
+    const nuevaSolicitud = {
       folio,
       canal_origen: 'messenger',
-      usuario: { messenger_psid: psid || null },
-      tipo_reporte,
-      categoria,
-      descripcion,
-      ubicacion_referencia: ubicacion_referencia || null,
-      estado: 'recibido',
-      prioridad: esSensible ? 'alta' : 'media',
-      requiere_escalamiento_humano: esSensible,
-      fecha_creacion: new Date(),
-      fecha_ultima_actualizacion: new Date(),
-      historial_estados: [
-        { estado: 'recibido', fecha: new Date(), comentario: 'Reporte generado vía bot.' },
-      ],
-    };
-
-    await database.collection('reportes_ciudadanos').insertOne(nuevoReporte);
-
-    res.json({ ok: true, folio, prioridad: nuevoReporte.prioridad });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ ok: false, error: 'Error al crear el reporte' });
-  }
-});
-
-// --- Consultar folio ---
-app.get('/api/reportes/:folio', async (req, res) => {
-  try {
-    const database = await connectDB();
-    const reporte = await database.collection('reportes_ciudadanos').findOne({ folio: req.params.folio });
-    if (!reporte) {
-      return res.status(404).json({ ok: false, error: 'Folio no encontrado' });
-    }
-    res.json({ ok: true, reporte });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ ok: false, error: 'Error al consultar folio' });
-  }
-});
-
-// --- Directorio de dependencias ---
-app.get('/api/dependencias', async (req, res) => {
-  try {
-    const database = await connectDB();
-    const { q } = req.query;
-    const filtro = q
-      ? { $or: [{ nombre_dependencia: { $regex: q, $options: 'i' } }, { servicios_que_atiende: { $regex: q, $options: 'i' } }] }
-      : {};
-    const resultados = await database.collection('directorio_dependencias').find(filtro).limit(5).toArray();
-    res.json({ ok: true, resultados });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ ok: false, error: 'Error al consultar directorio' });
-  }
-});
-
-// --- Guardar contacto (WhatsApp o correo) — con protección anti-duplicados ---
-app.post('/api/contactos', async (req, res) => {
-  try {
-    const database = await connectDB();
-    const { psid, nombre, tipo_contacto, valor_contacto, motivo } = req.body;
-    if (!valor_contacto) {
-      return res.status(400).json({ ok: false, error: 'Falta el dato de contacto (correo o número de WhatsApp)' });
-    }
-
-    // Anti-duplicados: si ya se guardó este mismo contacto en los últimos
-    // 5 minutos (mismo psid + mismo valor_contacto), no insertar de nuevo.
-    // Esto protege contra reintentos automáticos del agente o de la red.
-    const cincoMinutosAtras = new Date(Date.now() - 5 * 60 * 1000);
-    const yaExiste = await database.collection('contactos_ciudadanos').findOne({
-      psid: psid || null,
-      valor_contacto,
-      fecha_registro: { $gte: cincoMinutosAtras },
-    });
-
-    if (yaExiste) {
-      return res.json({ ok: true, mensaje: 'Contacto guardado correctamente' });
-    }
-
-    const nuevoContacto = {
       psid: psid || null,
       nombre: nombre || null,
-      tipo_contacto: tipo_contacto || 'no_especificado',
-      valor_contacto,
-      motivo: motivo || null,
-      fecha_registro: new Date(),
-      atendido: false,
+      tipo_consulta,
+      producto: producto || null,
+      talla: talla || null,
+      color: color || null,
+      ocasion: ocasion || null,
+      sucursal_preferida: sucursal_preferida || null,
+      codigo_postal: codigo_postal || null,
+      telefono_contacto: telefono_contacto || null,
+      resumen,
+      estado: 'pendiente',
+      fecha_creacion: new Date(),
     };
-    await database.collection('contactos_ciudadanos').insertOne(nuevoContacto);
-    res.json({ ok: true, mensaje: 'Contacto guardado correctamente' });
+
+    await database.collection('solicitudes_mocards').insertOne(nuevaSolicitud);
+
+    res.json({ ok: true, folio });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ ok: false, error: 'Error al guardar el contacto' });
+    res.status(500).json({ ok: false, error: 'Error al registrar la solicitud' });
   }
 });
-
-// --- Directorio de emergencia y seguridad ---
-app.get('/api/emergencias', async (req, res) => {
-  try {
-    const database = await connectDB();
-    const { categoria } = req.query;
-    const filtro = categoria ? { categoria } : {};
-    const resultados = await database.collection('contactos_emergencia').find(filtro).toArray();
-    res.json({ ok: true, resultados });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ ok: false, error: 'Error al consultar contactos de emergencia' });
-  }
-});
-
-// --- Preguntas frecuentes generales ---
-// Para todo lo que no encaje en programas/trámites/reportes/emergencias:
-// predial, ubicaciones, horarios, información general del municipio.
-app.get('/api/faq', async (req, res) => {
-  try {
-    const database = await connectDB();
-    const { q } = req.query;
-    const filtro = q
-      ? {
-          $or: [
-            { pregunta: { $regex: q, $options: 'i' } },
-            { tema: { $regex: q, $options: 'i' } },
-            { tags_busqueda: { $regex: q, $options: 'i' } },
-          ],
-        }
-      : {};
-    const resultados = await database.collection('preguntas_frecuentes').find(filtro).limit(3).toArray();
-    res.json({ ok: true, resultados });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ ok: false, error: 'Error al consultar preguntas frecuentes' });
-  }
-});
-
-module.exports = app;
