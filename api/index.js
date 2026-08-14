@@ -1,14 +1,56 @@
+// api/index.js
+// Middleware de Mocards (Juanita) — corre como función serverless en Vercel.
+// No usa app.listen(); exporta la app con module.exports.
+
+require('dotenv').config();
+const express = require('express');
+const { MongoClient } = require('mongodb');
+
+const app = express();
+app.use(express.json());
+
+const MONGO_URI = process.env.MONGO_URI;
+const DB_NAME = process.env.DB_NAME || 'dolores_hidalgo_atencion_ciudadana';
+const API_KEY = process.env.MIDDLEWARE_API_KEY;
+
+let client;
+let db;
+
+async function connectDB() {
+  if (db) return db;
+  client = new MongoClient(MONGO_URI, { maxPoolSize: 10 });
+  await client.connect();
+  db = client.db(DB_NAME);
+  console.log('✅ Conectado a MongoDB Atlas -', DB_NAME);
+  return db;
+}
+
+function checkApiKey(req, res, next) {
+  const key = req.headers['x-api-key'];
+  if (!API_KEY) {
+    console.warn('⚠️  MIDDLEWARE_API_KEY no está configurada');
+  }
+  if (key !== API_KEY) {
+    return res.status(401).json({ ok: false, error: 'No autorizado' });
+  }
+  next();
+}
+
+// Healthcheck público (sin API key)
+app.get('/health', (req, res) => {
+  res.json({ ok: true, status: 'up', timestamp: new Date().toISOString() });
+});
+
+app.use(checkApiKey);
+
 // --- Capturar solicitud de cliente (Mocards) — para pasar a un asesor ---
-// No consulta inventario/precios reales (Mocards aún no tiene esa
-// integración) — solo registra la consulta organizada para que un
-// asesor humano la revise y responda con datos reales.
 app.post('/api/solicitudes', async (req, res) => {
   try {
     const database = await connectDB();
     const {
       psid,
       nombre,
-      tipo_consulta,   // 'precio' | 'existencia' | 'apartado' | 'envio' | 'llamada' | 'queja' | 'otro'
+      tipo_consulta,
       producto,
       talla,
       color,
@@ -65,3 +107,5 @@ app.post('/api/solicitudes', async (req, res) => {
     res.status(500).json({ ok: false, error: 'Error al registrar la solicitud' });
   }
 });
+
+module.exports = app;
